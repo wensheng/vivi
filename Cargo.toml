@@ -14,7 +14,7 @@ image = "0.25"
 libc = "0.2"
 getrandom = "0.3"
 sha2 = "0.10"
-vivid_protocol = "*"
+vivid_protocol = "1.2.0"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
 cpal = "0.17"
