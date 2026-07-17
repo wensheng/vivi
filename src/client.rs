@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::cli::Config;
-use crate::ffmpeg::VideoInfo;
+use crate::ffmpeg::{AudioInfo, VideoInfo};
 use crate::protocol::anchor::{self, AnchorKey};
 use crate::protocol::media::{self, VideoPacket};
 use crate::protocol::messages::{
@@ -13,6 +13,7 @@ use crate::protocol::wire::{Connection, ConnectionKind, Endpoint, Record};
 
 const SYNTHETIC_CREDITS: u64 = u64::MAX / 4;
 const MAX_PENDING_CONTROL_RECORDS: usize = 4096;
+const CONPTY_ANCHOR_TRANSPORT: &str = "conpty";
 
 #[derive(Debug)]
 pub struct SourceHandle {
@@ -99,6 +100,7 @@ impl VividClient {
                         messages::FEATURE_VIDEO_ACCESS_UNIT_V1,
                         messages::FEATURE_VIDEO_CONTROL_V1,
                         messages::FEATURE_TEXT_ANCHORS_V2,
+                        messages::FEATURE_AUDIO_ACCESS_UNIT_V1,
                     ],
                     crate::protocol::CONTROL_MAX_RECORD_BODY,
                 )
@@ -280,6 +282,70 @@ impl VividClient {
         self.source_ready(request_id, source_id, "video")
     }
 
+    pub fn create_audio_source(
+        &mut self,
+        source_id: u64,
+        linked_video_source_id: Option<u64>,
+        info: &AudioInfo,
+    ) -> io::Result<SourceHandle> {
+        if !self.supports(messages::FEATURE_AUDIO_ACCESS_UNIT_V1) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "presenter lacks audio-access-unit-v1",
+            ));
+        }
+        let config = messages::AudioSourceConfig {
+            source_id,
+            linked_video_source_id,
+            codec: &info.codec,
+            packetization: &info.packetization,
+            extradata: &info.extradata,
+            sample_rate: info.sample_rate,
+            channels: info.channels,
+            channel_mask: info.channel_mask,
+            bitrate: info.bitrate,
+            max_access_unit_bytes: info.max_access_unit_bytes,
+        };
+        let probe_request = self.request_id()?;
+        self.control.write_record(
+            messages::PROBE_AUDIO_CONFIG,
+            0,
+            0,
+            &messages::probe_audio_config(
+                probe_request,
+                &messages::AudioSourceConfig {
+                    source_id: 0,
+                    linked_video_source_id: None,
+                    codec: &info.codec,
+                    packetization: &info.packetization,
+                    extradata: &info.extradata,
+                    sample_rate: info.sample_rate,
+                    channels: info.channels,
+                    channel_mask: info.channel_mask,
+                    bitrate: info.bitrate,
+                    max_access_unit_bytes: info.max_access_unit_bytes,
+                },
+            ),
+        )?;
+        if !self.dry_run {
+            let support = self.wait_for_reply(probe_request, &[messages::AUDIO_SUPPORT])?;
+            if !messages::parse_audio_support(&support.body)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("presenter cannot decode audio codec={}", info.codec),
+                ));
+            }
+        }
+        let request_id = self.request_id()?;
+        self.control.write_record(
+            messages::CREATE_AUDIO,
+            0,
+            source_id,
+            &messages::create_audio(request_id, &config),
+        )?;
+        self.source_ready(request_id, source_id, "audio")
+    }
+
     pub fn create_image_source(&mut self, config: &ImageSourceConfig) -> io::Result<SourceHandle> {
         if !self.supports(messages::FEATURE_ENCODED_IMAGE_V1) {
             return Err(io::Error::new(
@@ -384,12 +450,16 @@ impl VividClient {
         Ok(())
     }
 
-    /// Insert a zero-width authenticated marker at the current terminal cursor. Unix waits for the
-    /// presenter to attach it before continuing; Windows permits the node and marker to arrive in
-    /// either order because ConPTY can defer the acknowledgement while the producer is blocked.
+    /// Insert an authenticated marker at the current terminal cursor. APC transports wait for the
+    /// presenter to attach it before continuing. ConPTY uses a scanner-compatible envelope and
+    /// permits the node and marker to arrive in either order because it can defer terminal output
+    /// while the producer is blocked.
     pub fn create_text_anchor(&mut self) -> io::Result<Option<u64>> {
         if std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some() {
             return Ok(None);
+        }
+        if self.dry_run {
+            return self.allocate_id().map(Some);
         }
         let mut bytes = [0_u8; 8];
         getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
@@ -397,28 +467,25 @@ impl VividClient {
         if anchor_id == 0 {
             return self.create_text_anchor();
         }
-        if self.dry_run {
-            return Ok(Some(anchor_id));
-        }
 
         let marker = anchor::encode_marker(&self.anchor_key, &self.session_tag, anchor_id)
             .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-        #[cfg(windows)]
-        let marker = format!("{};VIVID-END", &marker[2..marker.len() - 2]);
+        let conpty_transport = uses_conpty_anchor_transport();
+        let marker = marker_for_transport(marker, conpty_transport);
         let mut stdout = io::stdout().lock();
         stdout.write_all(marker.as_bytes())?;
         stdout.flush()?;
         drop(stdout);
 
-        #[cfg(windows)]
-        {
+        if conpty_transport {
             if self.verbose {
-                eprintln!("vivi: submitted asynchronous text anchor {anchor_id} on Windows");
+                eprintln!(
+                    "vivi: submitted asynchronous text anchor {anchor_id} over ConPTY transport"
+                );
             }
             return Ok(Some(anchor_id));
         }
 
-        #[cfg(not(windows))]
         loop {
             let record = if let Some(index) = self.pending_control.iter().position(|record| {
                 record.record_type == messages::ANCHOR_READY && record.object_id == anchor_id
@@ -459,6 +526,7 @@ impl VividClient {
                 ConnectionKind::Blob => "blob",
                 ConnectionKind::Control => "control",
                 ConnectionKind::LocalBuffer => "buffer",
+                ConnectionKind::Audio => "audio",
             };
             Connection::trace(
                 &trace_dir.join(format!("{label}-{}.vivid", source.id)),
@@ -534,6 +602,20 @@ impl VividClient {
             .write_record(messages::VIDEO_PACKET, 0, channel.source_id, &body)
     }
 
+    pub fn send_audio_packet(
+        &mut self,
+        source: &mut SourceHandle,
+        channel: &mut MediaChannel,
+        packet: media::AudioPacket<'_>,
+    ) -> io::Result<()> {
+        let body = media::audio_packet_body(packet)?;
+        self.validate_record_size(source, body.len() as u64)?;
+        self.consume_credits(source, body.len() as u64)?;
+        channel
+            .connection
+            .write_record(messages::AUDIO_PACKET, 0, channel.source_id, &body)
+    }
+
     pub fn send_image_data(
         &mut self,
         source: &mut SourceHandle,
@@ -570,6 +652,17 @@ impl VividClient {
             0,
             source_id,
             &messages::eos(request_id, source_id, epoch),
+        )?;
+        self.wait_for_ok(request_id)
+    }
+
+    pub fn drain(&mut self, source_id: u64) -> io::Result<()> {
+        let request_id = self.request_id()?;
+        self.control.write_record(
+            messages::DRAIN,
+            0,
+            source_id,
+            &messages::drain(request_id, source_id),
         )?;
         self.wait_for_ok(request_id)
     }
@@ -882,6 +975,25 @@ impl VividClient {
     }
 }
 
+fn uses_conpty_anchor_transport() -> bool {
+    cfg!(windows)
+        || configured_anchor_transport_is_conpty(
+            std::env::var("VIVID_ANCHOR_TRANSPORT").ok().as_deref(),
+        )
+}
+
+fn configured_anchor_transport_is_conpty(transport: Option<&str>) -> bool {
+    transport == Some(CONPTY_ANCHOR_TRANSPORT)
+}
+
+fn marker_for_transport(marker: String, conpty_transport: bool) -> String {
+    if conpty_transport {
+        format!("{};VIVID-END", &marker[2..marker.len() - 2])
+    } else {
+        marker
+    }
+}
+
 impl SourceHandle {
     pub fn take_keyframe_request(&mut self) -> Option<u32> {
         self.need_keyframe_epoch.take()
@@ -949,5 +1061,21 @@ mod tests {
         let marker = anchor::encode_marker(&key, &[0; 16], 7).unwrap();
         assert!(marker.starts_with("\x1b_VIVID;2;A;"));
         assert!(marker.len() <= 128);
+    }
+
+    #[test]
+    fn remote_conpty_transport_selects_windows_marker_envelope() {
+        let key = anchor::derive_key(&[0; 32], &[0; 16]);
+        let marker = anchor::encode_marker(&key, &[0; 16], 7).unwrap();
+
+        assert!(configured_anchor_transport_is_conpty(Some("conpty")));
+        assert!(!configured_anchor_transport_is_conpty(None));
+        assert!(!configured_anchor_transport_is_conpty(Some("apc")));
+
+        let transported = marker_for_transport(marker.clone(), true);
+        assert!(transported.starts_with("VIVID;2;A;"));
+        assert!(transported.ends_with(";VIVID-END"));
+        assert!(!transported.contains('\x1b'));
+        assert_eq!(marker_for_transport(marker.clone(), false), marker);
     }
 }

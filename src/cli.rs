@@ -6,13 +6,13 @@ use clap::Parser;
 #[command(
     name = "vivi",
     version,
-    about = "Display images and play videos in Vivido using the Vivid Protocol",
-    long_about = "A Vivid Protocol image viewer and video player. It connects to the private \
+    about = "Display images and play video or audio in Vivido",
+    long_about = "A Vivid Protocol image viewer and local audio/video player. It connects to the private \
                   per-window endpoint inherited from Vivido; --dry-run and --trace-dir generate \
                   deterministic wire fixtures without a presenter."
 )]
 pub struct Config {
-    /// Image or video files to display.
+    /// Image, video, MP3, M4A, or WAV files to display or play.
     #[arg(required = true)]
     pub files: Vec<PathBuf>,
 
@@ -41,7 +41,7 @@ pub struct Config {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Exit as soon as media has been submitted instead of waiting for video playback.
+    /// Exit after video submission without waiting or starting local audio.
     #[arg(long)]
     pub no_wait: bool,
 }

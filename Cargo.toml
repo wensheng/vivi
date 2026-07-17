@@ -1,8 +1,8 @@
 [package]
 name = "vivi"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
-description = "A Vivid Protocol image viewer and video player for the Vivido terminal"
+description = "A Vivid Protocol image viewer and media player for the Vivido terminal"
 license = "MIT"
 readme = "README.md"
 build = "build.rs"
@@ -14,4 +14,8 @@ image = "0.25"
 libc = "0.2"
 getrandom = "0.3"
 sha2 = "0.10"
-vivid_protocol = "1.1"
+vivid_protocol = "*"
+
+[target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
+cpal = "0.17"
+ringbuf = "0.5"

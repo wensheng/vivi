@@ -9,8 +9,14 @@ use std::path::Path;
 use std::ptr;
 
 const AVMEDIA_TYPE_VIDEO: c_int = 0;
+const AVMEDIA_TYPE_AUDIO: c_int = 1;
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+const AV_SAMPLE_FMT_FLT: c_int = 3;
 const AV_LOG_QUIET: c_int = -8;
 const AV_NOPTS_VALUE: i64 = i64::MIN;
+const AV_PKT_DATA_SKIP_SAMPLES: c_int = 11;
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+const AVERROR_EOF: c_int = -541_478_725;
 const AVCOL_RANGE_UNSPECIFIED: c_int = 0;
 const AVCOL_PRI_UNSPECIFIED: c_int = 2;
 const AVCOL_TRC_UNSPECIFIED: c_int = 2;
@@ -24,6 +30,18 @@ struct AVChannelLayout {
     nb_channels: c_int,
     mask: u64,
     opaque: *mut c_void,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+impl Default for AVChannelLayout {
+    fn default() -> Self {
+        Self {
+            order: 0,
+            nb_channels: 0,
+            mask: 0,
+            opaque: ptr::null_mut(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -144,7 +162,28 @@ struct AVPacket {
     size: c_int,
     stream_index: c_int,
     flags: c_int,
+    side_data: *mut c_void,
+    side_data_elems: c_int,
+    duration: i64,
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+#[repr(C)]
+struct AVFrame {
+    data: [*mut u8; 8],
+    linesize: [c_int; 8],
+    extended_data: *mut *mut u8,
+    width: c_int,
+    height: c_int,
+    nb_samples: c_int,
+    format: c_int,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+enum AVCodecContext {}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+enum SwrContext {}
 
 unsafe extern "C" {
     fn av_log_set_level(level: c_int);
@@ -160,9 +199,73 @@ unsafe extern "C" {
     fn av_read_frame(context: *mut AVFormatContext, packet: *mut AVPacket) -> c_int;
     fn av_packet_alloc() -> *mut AVPacket;
     fn av_packet_unref(packet: *mut AVPacket);
+    fn av_packet_get_side_data(
+        packet: *const AVPacket,
+        side_data_type: c_int,
+        size: *mut usize,
+    ) -> *mut u8;
     fn av_packet_free(packet: *mut *mut AVPacket);
     fn avcodec_get_name(codec_id: u32) -> *const c_char;
     fn av_strerror(error: c_int, buffer: *mut c_char, buffer_size: usize) -> c_int;
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn avcodec_find_decoder(codec_id: u32) -> *const c_void;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn avcodec_alloc_context3(codec: *const c_void) -> *mut AVCodecContext;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn avcodec_parameters_to_context(
+        codec: *mut AVCodecContext,
+        parameters: *const AVCodecParameters,
+    ) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn avcodec_open2(
+        codec: *mut AVCodecContext,
+        decoder: *const c_void,
+        options: *mut *mut c_void,
+    ) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn avcodec_free_context(codec: *mut *mut AVCodecContext);
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn avcodec_send_packet(codec: *mut AVCodecContext, packet: *const AVPacket) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn avcodec_receive_frame(codec: *mut AVCodecContext, frame: *mut AVFrame) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn av_frame_alloc() -> *mut AVFrame;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn av_frame_free(frame: *mut *mut AVFrame);
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn av_channel_layout_default(layout: *mut AVChannelLayout, channels: c_int);
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn av_channel_layout_copy(
+        destination: *mut AVChannelLayout,
+        source: *const AVChannelLayout,
+    ) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn av_channel_layout_uninit(layout: *mut AVChannelLayout);
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn swr_alloc_set_opts2(
+        context: *mut *mut SwrContext,
+        output_layout: *const AVChannelLayout,
+        output_format: c_int,
+        output_rate: c_int,
+        input_layout: *const AVChannelLayout,
+        input_format: c_int,
+        input_rate: c_int,
+        log_offset: c_int,
+        log_context: *mut c_void,
+    ) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn swr_init(context: *mut SwrContext) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn swr_convert(
+        context: *mut SwrContext,
+        output: *mut *mut u8,
+        output_count: c_int,
+        input: *const *const u8,
+        input_count: c_int,
+    ) -> c_int;
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn swr_free(context: *mut *mut SwrContext);
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +286,22 @@ pub struct VideoInfo {
     pub sar_num: u32,
     pub sar_den: u32,
     pub max_access_unit_bytes: u32,
+    pub first_pts_us: Option<i64>,
+    pub has_audio: bool,
+    pub audio: Option<AudioInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioInfo {
+    pub codec: String,
+    pub packetization: String,
+    pub extradata: Vec<u8>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub channel_mask: u64,
+    pub bitrate: i64,
+    pub max_access_unit_bytes: u32,
+    pub first_pts_us: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -193,6 +312,22 @@ pub struct EncodedPacket {
     pub key: bool,
 }
 
+#[derive(Debug)]
+pub struct EncodedAudioPacket {
+    pub data: Vec<u8>,
+    pub pts_us: i64,
+    pub dts_us: i64,
+    pub duration_us: u64,
+    pub trim_start_samples: u32,
+    pub trim_end_samples: u32,
+}
+
+#[derive(Debug)]
+pub enum EncodedMediaPacket {
+    Video(EncodedPacket),
+    Audio(EncodedAudioPacket),
+}
+
 pub struct VideoDemuxer {
     context: *mut AVFormatContext,
     packet: *mut AVPacket,
@@ -200,6 +335,8 @@ pub struct VideoDemuxer {
     time_base: AVRational,
     info: VideoInfo,
     nal_length_size: Option<usize>,
+    audio_stream_index: Option<c_int>,
+    audio_time_base: Option<AVRational>,
 }
 
 impl VideoDemuxer {
@@ -252,7 +389,21 @@ impl VideoDemuxer {
             return Err(io::Error::other("FFmpeg could not allocate a packet"));
         }
 
-        let (info, nal_length_size) = unsafe { video_info(parameters)? };
+        let (mut info, nal_length_size) = unsafe { video_info(parameters)? };
+        let selected_audio = unsafe { find_audio_stream(context) };
+        info.has_audio = selected_audio.is_some();
+        let (audio_stream_index, audio_time_base, audio) = match selected_audio {
+            Some((index, stream, parameters)) => match unsafe { audio_info(parameters, stream) } {
+                Ok(info) => (
+                    Some(index),
+                    Some(unsafe { (*stream).time_base }),
+                    Some(info),
+                ),
+                Err(_) => (None, None, None),
+            },
+            None => (None, None, None),
+        };
+        info.audio = audio;
         let time_base = unsafe { (*stream).time_base };
         if time_base.num <= 0 || time_base.den <= 0 {
             let mut packet = packet;
@@ -273,14 +424,32 @@ impl VideoDemuxer {
             time_base,
             info,
             nal_length_size,
+            audio_stream_index,
+            audio_time_base,
         })
     }
 
     pub fn inspect(path: &Path) -> io::Result<VideoInfo> {
         let mut demuxer = Self::open(path)?;
         let mut maximum = 0_usize;
-        while let Some(packet) = demuxer.next_packet()? {
-            maximum = maximum.max(packet.data.len());
+        let mut audio_maximum = 0_usize;
+        while let Some(packet) = demuxer.next_media_packet()? {
+            match packet {
+                EncodedMediaPacket::Video(packet) => {
+                    maximum = maximum.max(packet.data.len());
+                    if packet.pts_us != AV_NOPTS_VALUE {
+                        demuxer.info.first_pts_us.get_or_insert(packet.pts_us);
+                    }
+                }
+                EncodedMediaPacket::Audio(packet) => {
+                    audio_maximum = audio_maximum.max(packet.data.len());
+                    if packet.pts_us != AV_NOPTS_VALUE
+                        && let Some(info) = demuxer.info.audio.as_mut()
+                    {
+                        info.first_pts_us.get_or_insert(packet.pts_us);
+                    }
+                }
+            }
         }
         if maximum == 0 {
             return Err(io::Error::new(
@@ -290,10 +459,18 @@ impl VideoDemuxer {
         }
         demuxer.info.max_access_unit_bytes = u32::try_from(maximum)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "access unit exceeds u32"))?;
+        if let Some(audio) = demuxer.info.audio.as_mut() {
+            audio.max_access_unit_bytes = u32::try_from(audio_maximum).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "audio access unit exceeds u32")
+            })?;
+            if audio.max_access_unit_bytes == 0 {
+                demuxer.info.audio = None;
+            }
+        }
         Ok(demuxer.info.clone())
     }
 
-    pub fn next_packet(&mut self) -> io::Result<Option<EncodedPacket>> {
+    pub fn next_media_packet(&mut self) -> io::Result<Option<EncodedMediaPacket>> {
         loop {
             unsafe { av_packet_unref(self.packet) };
             let result = unsafe { av_read_frame(self.context, self.packet) };
@@ -302,7 +479,9 @@ impl VideoDemuxer {
             }
 
             let packet = unsafe { &*self.packet };
-            if packet.stream_index != self.stream_index {
+            if packet.stream_index != self.stream_index
+                && Some(packet.stream_index) != self.audio_stream_index
+            {
                 continue;
             }
             if packet.size < 0 || (packet.size > 0 && packet.data.is_null()) {
@@ -317,20 +496,166 @@ impl VideoDemuxer {
             } else {
                 unsafe { std::slice::from_raw_parts(packet.data, packet.size as usize) }.to_vec()
             };
-            if let Some(length_size) = self.nal_length_size {
-                data = length_prefixed_to_annex_b(&data, length_size)?;
+            if packet.stream_index == self.stream_index {
+                if let Some(length_size) = self.nal_length_size {
+                    data = length_prefixed_to_annex_b(&data, length_size)?;
+                }
+                return Ok(Some(EncodedMediaPacket::Video(EncodedPacket {
+                    key: vivid_protocol::media::access_unit_is_key(&self.info.codec, &data)?,
+                    data,
+                    pts_us: timestamp_us(packet.pts, self.time_base),
+                    dts_us: timestamp_us(packet.dts, self.time_base),
+                })));
             }
-            return Ok(Some(EncodedPacket {
-                key: vivid_protocol::media::access_unit_is_key(&self.info.codec, &data)?,
+            let time_base = self.audio_time_base.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "audio stream has no time base")
+            })?;
+            let (trim_start_samples, trim_end_samples) = packet_trim(packet);
+            return Ok(Some(EncodedMediaPacket::Audio(EncodedAudioPacket {
                 data,
-                pts_us: timestamp_us(packet.pts, self.time_base),
-                dts_us: timestamp_us(packet.dts, self.time_base),
-            }));
+                pts_us: timestamp_us(packet.pts, time_base),
+                dts_us: timestamp_us(packet.dts, time_base),
+                duration_us: timestamp_duration_us(packet.duration, time_base),
+                trim_start_samples,
+                trim_end_samples,
+            })));
         }
     }
 }
 
 impl Drop for VideoDemuxer {
+    fn drop(&mut self) {
+        unsafe {
+            av_packet_free(&mut self.packet);
+            avformat_close_input(&mut self.context);
+        }
+    }
+}
+
+pub struct AudioDemuxer {
+    context: *mut AVFormatContext,
+    packet: *mut AVPacket,
+    stream_index: c_int,
+    time_base: AVRational,
+    info: AudioInfo,
+}
+
+impl AudioDemuxer {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let path = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "media path contains a NUL byte",
+            )
+        })?;
+        unsafe { av_log_set_level(AV_LOG_QUIET) };
+        let mut context = ptr::null_mut();
+        let result = unsafe {
+            avformat_open_input(
+                &mut context,
+                path.as_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if result < 0 {
+            return Err(ffmpeg_error("could not open audio media", result));
+        }
+        let result = unsafe { avformat_find_stream_info(context, ptr::null_mut()) };
+        if result < 0 {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(ffmpeg_error("could not inspect audio streams", result));
+        }
+        let Some((stream_index, stream, parameters)) = (unsafe { find_audio_stream(context) })
+        else {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "media has no audio stream",
+            ));
+        };
+        let time_base = unsafe { (*stream).time_base };
+        if time_base.num <= 0 || time_base.den <= 0 {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid audio time base",
+            ));
+        }
+        let info = unsafe { audio_info(parameters, stream)? };
+        let packet = unsafe { av_packet_alloc() };
+        if packet.is_null() {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(io::Error::other(
+                "FFmpeg could not allocate an audio packet",
+            ));
+        }
+        Ok(Self {
+            context,
+            packet,
+            stream_index,
+            time_base,
+            info,
+        })
+    }
+
+    pub fn inspect(path: &Path) -> io::Result<AudioInfo> {
+        let mut demuxer = Self::open(path)?;
+        let mut maximum = 0_usize;
+        while let Some(packet) = demuxer.next_packet()? {
+            maximum = maximum.max(packet.data.len());
+            if packet.pts_us != AV_NOPTS_VALUE {
+                demuxer.info.first_pts_us.get_or_insert(packet.pts_us);
+            }
+        }
+        if maximum == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "audio access unit is empty",
+            ));
+        }
+        demuxer.info.max_access_unit_bytes = u32::try_from(maximum).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "audio access unit exceeds u32")
+        })?;
+        Ok(demuxer.info.clone())
+    }
+
+    pub fn next_packet(&mut self) -> io::Result<Option<EncodedAudioPacket>> {
+        loop {
+            unsafe { av_packet_unref(self.packet) };
+            let result = unsafe { av_read_frame(self.context, self.packet) };
+            if result < 0 {
+                return Ok(None);
+            }
+            let packet = unsafe { &*self.packet };
+            if packet.stream_index != self.stream_index {
+                continue;
+            }
+            if packet.size < 0 || (packet.size > 0 && packet.data.is_null()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid audio packet",
+                ));
+            }
+            let data = if packet.size == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(packet.data, packet.size as usize) }.to_vec()
+            };
+            let (trim_start_samples, trim_end_samples) = packet_trim(packet);
+            return Ok(Some(EncodedAudioPacket {
+                data,
+                pts_us: timestamp_us(packet.pts, self.time_base),
+                dts_us: timestamp_us(packet.dts, self.time_base),
+                duration_us: timestamp_duration_us(packet.duration, self.time_base),
+                trim_start_samples,
+                trim_end_samples,
+            }));
+        }
+    }
+}
+
+impl Drop for AudioDemuxer {
     fn drop(&mut self) {
         unsafe {
             av_packet_free(&mut self.packet);
@@ -350,6 +675,394 @@ unsafe fn find_video_stream(
         }
         let parameters = unsafe { (*stream).codecpar };
         if !parameters.is_null() && unsafe { (*parameters).codec_type } == AVMEDIA_TYPE_VIDEO {
+            return Some((index as c_int, stream, parameters));
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+#[derive(Debug)]
+pub struct DecodedAudio {
+    pub samples: Vec<f32>,
+}
+
+/// FFmpeg audio decoder and software resampler used by the local output worker.
+///
+/// The value is intentionally created and consumed on one worker thread. Raw FFmpeg pointers never
+/// cross the thread boundary.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+pub struct AudioDecoder {
+    context: *mut AVFormatContext,
+    codec: *mut AVCodecContext,
+    packet: *mut AVPacket,
+    frame: *mut AVFrame,
+    resampler: *mut SwrContext,
+    parameters: *mut AVCodecParameters,
+    stream_index: c_int,
+    time_base: AVRational,
+    input_sample_rate: c_int,
+    output_sample_rate: c_int,
+    output_channels: c_int,
+    first_pts_us: Option<i64>,
+    input_eof: bool,
+    resampler_drained: bool,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+impl AudioDecoder {
+    pub fn open(path: &Path, output_sample_rate: u32, output_channels: u16) -> io::Result<Self> {
+        let path = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "media path contains a NUL byte",
+            )
+        })?;
+        let output_sample_rate = c_int::try_from(output_sample_rate).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "output sample rate is too large",
+            )
+        })?;
+        let output_channels = c_int::from(output_channels);
+        if output_sample_rate <= 0 || output_channels <= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid audio output configuration",
+            ));
+        }
+
+        unsafe { av_log_set_level(AV_LOG_QUIET) };
+        let mut context = ptr::null_mut();
+        let open_result = unsafe {
+            avformat_open_input(
+                &mut context,
+                path.as_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if open_result < 0 {
+            return Err(ffmpeg_error("could not open audio media", open_result));
+        }
+
+        let stream_result = unsafe { avformat_find_stream_info(context, ptr::null_mut()) };
+        if stream_result < 0 {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(ffmpeg_error(
+                "could not inspect audio streams",
+                stream_result,
+            ));
+        }
+
+        let Some((stream_index, stream, parameters)) = (unsafe { find_audio_stream(context) })
+        else {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "media has no audio stream",
+            ));
+        };
+        let input_sample_rate = unsafe { (*parameters).sample_rate };
+        if input_sample_rate <= 0 {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "audio stream has no sample rate",
+            ));
+        }
+        let time_base = unsafe { (*stream).time_base };
+        let stream_start = unsafe { (*stream).start_time };
+        let first_pts_us =
+            (stream_start != AV_NOPTS_VALUE && time_base.num > 0 && time_base.den > 0)
+                .then(|| timestamp_us(stream_start, time_base));
+
+        let decoder = unsafe { avcodec_find_decoder((*parameters).codec_id) };
+        if decoder.is_null() {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "FFmpeg has no decoder for the audio stream",
+            ));
+        }
+        let mut codec = unsafe { avcodec_alloc_context3(decoder) };
+        if codec.is_null() {
+            unsafe { avformat_close_input(&mut context) };
+            return Err(io::Error::other(
+                "FFmpeg could not allocate an audio decoder context",
+            ));
+        }
+        let parameters_result = unsafe { avcodec_parameters_to_context(codec, parameters) };
+        if parameters_result < 0 {
+            unsafe {
+                avcodec_free_context(&mut codec);
+                avformat_close_input(&mut context);
+            }
+            return Err(ffmpeg_error(
+                "could not configure the audio decoder",
+                parameters_result,
+            ));
+        }
+        let decoder_result = unsafe { avcodec_open2(codec, decoder, ptr::null_mut()) };
+        if decoder_result < 0 {
+            unsafe {
+                avcodec_free_context(&mut codec);
+                avformat_close_input(&mut context);
+            }
+            return Err(ffmpeg_error(
+                "could not open the audio decoder",
+                decoder_result,
+            ));
+        }
+
+        let mut packet = unsafe { av_packet_alloc() };
+        if packet.is_null() {
+            unsafe {
+                avcodec_free_context(&mut codec);
+                avformat_close_input(&mut context);
+            }
+            return Err(io::Error::other(
+                "FFmpeg could not allocate an audio packet",
+            ));
+        }
+        let frame = unsafe { av_frame_alloc() };
+        if frame.is_null() {
+            unsafe {
+                av_packet_free(&mut packet);
+                avcodec_free_context(&mut codec);
+                avformat_close_input(&mut context);
+            }
+            return Err(io::Error::other("FFmpeg could not allocate an audio frame"));
+        }
+
+        Ok(Self {
+            context,
+            codec,
+            packet,
+            frame,
+            resampler: ptr::null_mut(),
+            parameters,
+            stream_index,
+            time_base,
+            input_sample_rate,
+            output_sample_rate,
+            output_channels,
+            first_pts_us,
+            input_eof: false,
+            resampler_drained: false,
+        })
+    }
+
+    pub fn first_pts_us(&self) -> Option<i64> {
+        self.first_pts_us
+    }
+
+    pub fn next_frame(&mut self) -> io::Result<Option<DecodedAudio>> {
+        loop {
+            let receive_result = unsafe { avcodec_receive_frame(self.codec, self.frame) };
+            if receive_result == 0 {
+                if let Some(frame) = self.convert_frame()? {
+                    return Ok(Some(frame));
+                }
+                continue;
+            }
+            if receive_result != -libc::EAGAIN && receive_result != AVERROR_EOF {
+                return Err(ffmpeg_error(
+                    "could not decode an audio frame",
+                    receive_result,
+                ));
+            }
+
+            if self.input_eof {
+                return self.flush_resampler();
+            }
+
+            let mut found_audio = false;
+            loop {
+                unsafe { av_packet_unref(self.packet) };
+                let read_result = unsafe { av_read_frame(self.context, self.packet) };
+                if read_result < 0 {
+                    let flush_result = unsafe { avcodec_send_packet(self.codec, ptr::null()) };
+                    if flush_result < 0 && flush_result != AVERROR_EOF {
+                        return Err(ffmpeg_error(
+                            "could not flush the audio decoder",
+                            flush_result,
+                        ));
+                    }
+                    self.input_eof = true;
+                    break;
+                }
+                let packet = unsafe { &*self.packet };
+                if packet.stream_index != self.stream_index {
+                    continue;
+                }
+                if self.first_pts_us.is_none() && packet.pts != AV_NOPTS_VALUE {
+                    self.first_pts_us = Some(timestamp_us(packet.pts, self.time_base));
+                }
+                found_audio = true;
+                break;
+            }
+
+            if found_audio {
+                let send_result = unsafe { avcodec_send_packet(self.codec, self.packet) };
+                unsafe { av_packet_unref(self.packet) };
+                if send_result < 0 && send_result != -libc::EAGAIN {
+                    return Err(ffmpeg_error(
+                        "could not submit an audio packet",
+                        send_result,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn convert_frame(&mut self) -> io::Result<Option<DecodedAudio>> {
+        let frame = unsafe { &*self.frame };
+        if frame.nb_samples <= 0 {
+            return Ok(None);
+        }
+        if self.resampler.is_null() {
+            self.initialize_resampler(frame.format)?;
+        }
+
+        let maximum_samples = (i64::from(frame.nb_samples)
+            .saturating_mul(i64::from(self.output_sample_rate))
+            / i64::from(self.input_sample_rate)
+            + 256)
+            .clamp(1, i64::from(c_int::MAX)) as c_int;
+        let sample_count = usize::try_from(maximum_samples)
+            .ok()
+            .and_then(|samples| samples.checked_mul(self.output_channels as usize))
+            .ok_or_else(|| io::Error::other("resampled audio frame is too large"))?;
+        let mut samples = vec![0.0_f32; sample_count];
+        let mut output = [ptr::null_mut(); 8];
+        output[0] = samples.as_mut_ptr().cast();
+        let input = if frame.extended_data.is_null() {
+            frame.data.as_ptr() as *const *const u8
+        } else {
+            frame.extended_data as *const *const u8
+        };
+        let converted = unsafe {
+            swr_convert(
+                self.resampler,
+                output.as_mut_ptr(),
+                maximum_samples,
+                input,
+                frame.nb_samples,
+            )
+        };
+        if converted < 0 {
+            return Err(ffmpeg_error("could not resample audio", converted));
+        }
+        samples.truncate(converted as usize * self.output_channels as usize);
+        Ok((!samples.is_empty()).then_some(DecodedAudio { samples }))
+    }
+
+    fn initialize_resampler(&mut self, input_format: c_int) -> io::Result<()> {
+        let mut input_layout = AVChannelLayout::default();
+        let parameters = unsafe { &*self.parameters };
+        if parameters.ch_layout.nb_channels > 0 {
+            let copy_result =
+                unsafe { av_channel_layout_copy(&mut input_layout, &parameters.ch_layout) };
+            if copy_result < 0 {
+                return Err(ffmpeg_error(
+                    "could not copy the input channel layout",
+                    copy_result,
+                ));
+            }
+        } else {
+            unsafe { av_channel_layout_default(&mut input_layout, 2) };
+        }
+
+        let mut output_layout = AVChannelLayout::default();
+        unsafe { av_channel_layout_default(&mut output_layout, self.output_channels) };
+        let result = unsafe {
+            swr_alloc_set_opts2(
+                &mut self.resampler,
+                &output_layout,
+                AV_SAMPLE_FMT_FLT,
+                self.output_sample_rate,
+                &input_layout,
+                input_format,
+                self.input_sample_rate,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        unsafe {
+            av_channel_layout_uninit(&mut input_layout);
+            av_channel_layout_uninit(&mut output_layout);
+        }
+        if result < 0 || self.resampler.is_null() {
+            return Err(ffmpeg_error(
+                "could not allocate the audio resampler",
+                result,
+            ));
+        }
+        let init_result = unsafe { swr_init(self.resampler) };
+        if init_result < 0 {
+            unsafe { swr_free(&mut self.resampler) };
+            return Err(ffmpeg_error(
+                "could not initialize the audio resampler",
+                init_result,
+            ));
+        }
+        Ok(())
+    }
+
+    fn flush_resampler(&mut self) -> io::Result<Option<DecodedAudio>> {
+        if self.resampler.is_null() || self.resampler_drained {
+            return Ok(None);
+        }
+        let maximum_samples = 4096 as c_int;
+        let mut samples = vec![0.0_f32; maximum_samples as usize * self.output_channels as usize];
+        let mut output = [ptr::null_mut(); 8];
+        output[0] = samples.as_mut_ptr().cast();
+        let converted = unsafe {
+            swr_convert(
+                self.resampler,
+                output.as_mut_ptr(),
+                maximum_samples,
+                ptr::null(),
+                0,
+            )
+        };
+        if converted < 0 {
+            return Err(ffmpeg_error("could not drain resampled audio", converted));
+        }
+        if converted == 0 {
+            self.resampler_drained = true;
+            return Ok(None);
+        }
+        samples.truncate(converted as usize * self.output_channels as usize);
+        Ok(Some(DecodedAudio { samples }))
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+impl Drop for AudioDecoder {
+    fn drop(&mut self) {
+        unsafe {
+            swr_free(&mut self.resampler);
+            av_frame_free(&mut self.frame);
+            av_packet_free(&mut self.packet);
+            avcodec_free_context(&mut self.codec);
+            avformat_close_input(&mut self.context);
+        }
+    }
+}
+
+unsafe fn find_audio_stream(
+    context: *mut AVFormatContext,
+) -> Option<(c_int, *mut AVStream, *mut AVCodecParameters)> {
+    let context = unsafe { &*context };
+    for index in 0..context.nb_streams as usize {
+        let stream = unsafe { *context.streams.add(index) };
+        if stream.is_null() {
+            continue;
+        }
+        let parameters = unsafe { (*stream).codecpar };
+        if !parameters.is_null() && unsafe { (*parameters).codec_type } == AVMEDIA_TYPE_AUDIO {
             return Some((index as c_int, stream, parameters));
         }
     }
@@ -444,9 +1157,72 @@ unsafe fn video_info(parameters: *mut AVCodecParameters) -> io::Result<(VideoInf
             sar_num,
             sar_den,
             max_access_unit_bytes: 0,
+            first_pts_us: None,
+            has_audio: false,
+            audio: None,
         },
         nal_length_size,
     ))
+}
+
+unsafe fn audio_info(
+    parameters: *mut AVCodecParameters,
+    stream: *mut AVStream,
+) -> io::Result<AudioInfo> {
+    let parameters = unsafe { &*parameters };
+    let codec_pointer = unsafe { avcodec_get_name(parameters.codec_id) };
+    let codec = if codec_pointer.is_null() {
+        format!("ffmpeg-codec-{}", parameters.codec_id)
+    } else {
+        unsafe { CStr::from_ptr(codec_pointer) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let packetization = match codec.as_str() {
+        "mp3" => "mp3-frame-v1",
+        "aac" => "aac-raw-au-v1",
+        "alac" => "alac-frame-v1",
+        "pcm_u8" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" | "pcm_f64le"
+        | "pcm_mulaw" | "pcm_alaw" => "pcm-packet-v1",
+        _ => "unsupported-audio-packetization",
+    };
+    let extradata_size = usize::try_from(parameters.extradata_size)
+        .ok()
+        .filter(|size| *size <= MAX_EXTRADATA)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid audio extradata"))?;
+    let extradata = if extradata_size == 0 {
+        Vec::new()
+    } else if parameters.extradata.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "audio extradata pointer is null",
+        ));
+    } else {
+        unsafe { std::slice::from_raw_parts(parameters.extradata, extradata_size) }.to_vec()
+    };
+    let sample_rate = u32::try_from(parameters.sample_rate).unwrap_or(0);
+    let channels = u16::try_from(parameters.ch_layout.nb_channels).unwrap_or(0);
+    let channel_mask = if matches!(parameters.ch_layout.order, 0 | 1) {
+        parameters.ch_layout.mask
+    } else {
+        u64::MAX
+    };
+    let stream = unsafe { &*stream };
+    let first_pts_us = (stream.start_time != AV_NOPTS_VALUE
+        && stream.time_base.num > 0
+        && stream.time_base.den > 0)
+        .then(|| timestamp_us(stream.start_time, stream.time_base));
+    Ok(AudioInfo {
+        codec,
+        packetization: packetization.into(),
+        extradata,
+        sample_rate,
+        channels,
+        channel_mask,
+        bitrate: parameters.bit_rate,
+        max_access_unit_bytes: 0,
+        first_pts_us,
+    })
 }
 
 fn normalize_h26x_extradata(data: &[u8], hevc: bool) -> io::Result<(Vec<u8>, Option<usize>)> {
@@ -634,6 +1410,26 @@ fn timestamp_us(timestamp: i64, time_base: AVRational) -> i64 {
         .saturating_mul(1_000_000)
         / i128::from(time_base.den);
     value.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+fn timestamp_duration_us(timestamp: i64, time_base: AVRational) -> u64 {
+    if timestamp <= 0 {
+        return 0;
+    }
+    u64::try_from(timestamp_us(timestamp, time_base)).unwrap_or(u64::MAX)
+}
+
+fn packet_trim(packet: &AVPacket) -> (u32, u32) {
+    let mut size = 0_usize;
+    let data = unsafe { av_packet_get_side_data(packet, AV_PKT_DATA_SKIP_SAMPLES, &mut size) };
+    if data.is_null() || size < 8 {
+        return (0, 0);
+    }
+    let values = unsafe { std::slice::from_raw_parts(data, 8) };
+    (
+        u32::from_le_bytes(values[0..4].try_into().unwrap()),
+        u32::from_le_bytes(values[4..8].try_into().unwrap()),
+    )
 }
 
 fn ffmpeg_error(context: &str, code: c_int) -> io::Error {
