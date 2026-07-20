@@ -510,7 +510,17 @@ impl VideoDemuxer {
             let time_base = self.audio_time_base.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "audio stream has no time base")
             })?;
-            let (trim_start_samples, trim_end_samples) = packet_trim(packet);
+            let (mut trim_start_samples, trim_end_samples) = packet_trim(packet);
+            if self
+                .info
+                .audio
+                .as_ref()
+                .is_some_and(|audio| audio.codec == "opus")
+            {
+                // OpusHead pre-skip is applied by the presenter decoder. FFmpeg also exposes the
+                // same initial discard as packet side data; carrying both would trim twice.
+                trim_start_samples = 0;
+            }
             return Ok(Some(EncodedMediaPacket::Audio(EncodedAudioPacket {
                 data,
                 pts_us: timestamp_us(packet.pts, time_base),
@@ -642,7 +652,10 @@ impl AudioDemuxer {
             } else {
                 unsafe { std::slice::from_raw_parts(packet.data, packet.size as usize) }.to_vec()
             };
-            let (trim_start_samples, trim_end_samples) = packet_trim(packet);
+            let (mut trim_start_samples, trim_end_samples) = packet_trim(packet);
+            if self.info.codec == "opus" {
+                trim_start_samples = 0;
+            }
             return Ok(Some(EncodedAudioPacket {
                 data,
                 pts_us: timestamp_us(packet.pts, self.time_base),
@@ -1182,6 +1195,9 @@ unsafe fn audio_info(
         "mp3" => "mp3-frame-v1",
         "aac" => "aac-raw-au-v1",
         "alac" => "alac-frame-v1",
+        "opus" => vivid_protocol::messages::AUDIO_PACKETIZATION_OPUS,
+        "vorbis" => vivid_protocol::messages::AUDIO_PACKETIZATION_VORBIS,
+        "flac" => vivid_protocol::messages::AUDIO_PACKETIZATION_FLAC,
         "pcm_u8" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" | "pcm_f64le"
         | "pcm_mulaw" | "pcm_alaw" => "pcm-packet-v1",
         _ => "unsupported-audio-packetization",
@@ -1202,6 +1218,16 @@ unsafe fn audio_info(
     };
     let sample_rate = u32::try_from(parameters.sample_rate).unwrap_or(0);
     let channels = u16::try_from(parameters.ch_layout.nb_channels).unwrap_or(0);
+    let extradata = normalize_audio_extradata(&codec, &extradata)?;
+    if vivid_protocol::messages::valid_audio_packetization(&codec, packetization) {
+        vivid_protocol::messages::validate_audio_initialization(
+            &codec,
+            packetization,
+            &extradata,
+            sample_rate,
+            channels,
+        )?;
+    }
     let channel_mask = if matches!(parameters.ch_layout.order, 0 | 1) {
         parameters.ch_layout.mask
     } else {
@@ -1223,6 +1249,89 @@ unsafe fn audio_info(
         max_access_unit_bytes: 0,
         first_pts_us,
     })
+}
+
+fn normalize_audio_extradata(codec: &str, data: &[u8]) -> io::Result<Vec<u8>> {
+    match codec {
+        "opus" => {
+            if data.starts_with(b"OpusHead") {
+                Ok(data.to_vec())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Opus stream has no canonical OpusHead",
+                ))
+            }
+        }
+        "vorbis" => normalize_vorbis_extradata(data),
+        "flac" => normalize_flac_extradata(data),
+        _ => Ok(data.to_vec()),
+    }
+}
+
+fn normalize_vorbis_extradata(data: &[u8]) -> io::Result<Vec<u8>> {
+    if data.first() == Some(&2) {
+        return Ok(data.to_vec());
+    }
+    if data.len() < 6 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Vorbis private data is truncated",
+        ));
+    }
+    let lengths = [
+        usize::from(u16::from_be_bytes(data[0..2].try_into().unwrap())),
+        usize::from(u16::from_be_bytes(data[2..4].try_into().unwrap())),
+        usize::from(u16::from_be_bytes(data[4..6].try_into().unwrap())),
+    ];
+    let total = lengths
+        .iter()
+        .try_fold(6_usize, |total, length| total.checked_add(*length))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Vorbis lengths overflow"))?;
+    if total != data.len() || lengths.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported Vorbis private-data packing",
+        ));
+    }
+    let mut output = vec![2];
+    append_xiph_length(&mut output, lengths[0]);
+    append_xiph_length(&mut output, lengths[1]);
+    output.extend_from_slice(&data[6..]);
+    Ok(output)
+}
+
+fn append_xiph_length(output: &mut Vec<u8>, mut length: usize) {
+    while length >= 255 {
+        output.push(255);
+        length -= 255;
+    }
+    output.push(length as u8);
+}
+
+fn normalize_flac_extradata(data: &[u8]) -> io::Result<Vec<u8>> {
+    if data.len() == 34 {
+        return Ok(data.to_vec());
+    }
+    let block = if data.len() == 42 && &data[..4] == b"fLaC" {
+        &data[4..]
+    } else if data.len() == 38 {
+        data
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "FLAC private data has no canonical STREAMINFO",
+        ));
+    };
+    let block_type = block[0] & 0x7f;
+    let block_length = u32::from_be_bytes([0, block[1], block[2], block[3]]) as usize;
+    if block_type != 0 || block_length != 34 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "FLAC private data does not begin with STREAMINFO",
+        ));
+    }
+    Ok(block[4..].to_vec())
 }
 
 fn normalize_h26x_extradata(data: &[u8], hevc: bool) -> io::Result<(Vec<u8>, Option<usize>)> {
@@ -1497,5 +1606,26 @@ mod tests {
         assert!(map_transfer(22).is_err());
         assert!(map_matrix(22, 1080).is_err());
         assert!(map_range(22).is_err());
+    }
+
+    #[test]
+    fn portable_audio_private_data_is_canonicalized() {
+        let mut legacy_vorbis = Vec::new();
+        legacy_vorbis.extend_from_slice(&3_u16.to_be_bytes());
+        legacy_vorbis.extend_from_slice(&4_u16.to_be_bytes());
+        legacy_vorbis.extend_from_slice(&5_u16.to_be_bytes());
+        legacy_vorbis.extend_from_slice(b"abcdefghijkl");
+        assert_eq!(
+            normalize_vorbis_extradata(&legacy_vorbis).unwrap(),
+            [vec![2, 3, 4], b"abcdefghijkl".to_vec()].concat()
+        );
+
+        let streaminfo = [0x5a; 34];
+        let mut flac = b"fLaC".to_vec();
+        flac.extend_from_slice(&[0x80, 0, 0, 34]);
+        flac.extend_from_slice(&streaminfo);
+        assert_eq!(normalize_flac_extradata(&flac).unwrap(), streaminfo);
+
+        assert!(normalize_audio_extradata("opus", b"not-an-opus-head").is_err());
     }
 }

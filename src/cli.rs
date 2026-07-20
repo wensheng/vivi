@@ -24,6 +24,10 @@ pub struct Config {
     #[arg(long, env = "VIVID_ENDPOINT")]
     pub endpoint: Option<String>,
 
+    /// Alternate endpoint for media connections, normally inherited as VIVID_ENDPOINT_BULK.
+    #[arg(long, env = "VIVID_ENDPOINT_BULK")]
+    pub bulk_endpoint: Option<String>,
+
     /// Vivid capability token, normally inherited from Vivido as VIVID_TOKEN.
     #[arg(long, env = "VIVID_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
@@ -90,6 +94,7 @@ mod tests {
             files: vec![PathBuf::from("image.png")],
             zoom: 1.0,
             endpoint: None,
+            bulk_endpoint: None,
             token: None,
             dry_run: true,
             trace_dir: None,

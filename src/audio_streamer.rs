@@ -40,7 +40,7 @@ pub fn play(client: &mut VividClient, path: &Path) -> Result<(), Box<dyn std::er
         )?;
         buffered_us = buffered_us.saturating_add(packet.duration_us);
         if !started && buffered_us >= INITIAL_BUFFER_US {
-            client.play(source_id, INITIAL_BUFFER_US)?;
+            client.play_at(source_id, info.first_pts_us.unwrap_or(0), INITIAL_BUFFER_US)?;
             started = true;
         }
     }
@@ -48,7 +48,7 @@ pub fn play(client: &mut VividClient, path: &Path) -> Result<(), Box<dyn std::er
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "audio has no packets").into());
     }
     if !started {
-        client.play(source_id, buffered_us)?;
+        client.play_at(source_id, info.first_pts_us.unwrap_or(0), buffered_us)?;
     }
     client.eos(source_id, 1)?;
     client.drain(source_id)?;

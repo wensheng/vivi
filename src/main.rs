@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::cli::Config;
-use crate::client::VividClient;
+use crate::client::{VividClient, producer_config};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MediaHint {
@@ -38,7 +38,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::parse();
     config.validate()?;
 
-    let mut client = VividClient::connect(&config)?;
+    let mut client = VividClient::connect(&producer_config(&config))?;
     for file in &config.files {
         let result = match media_hint(file) {
             MediaHint::Video => video_player::play(&config, &mut client, file),
@@ -138,7 +138,7 @@ fn looks_like_audio(path: &Path) -> bool {
         .unwrap_or_default();
     matches!(
         extension.to_ascii_lowercase().as_str(),
-        "mp3" | "m4a" | "wav"
+        "mp3" | "m4a" | "wav" | "flac" | "ogg" | "opus"
     )
 }
 
@@ -174,6 +174,7 @@ mod tests {
             files: vec!["song.mp3".into()],
             zoom: 1.0,
             endpoint: None,
+            bulk_endpoint: None,
             token: None,
             dry_run: false,
             trace_dir: None,

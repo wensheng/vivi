@@ -323,7 +323,7 @@ mod platform {
         let error_shared = shared.clone();
         device
             .build_output_stream(
-                config,
+                *config,
                 move |output: &mut [T], _| {
                     if !shared.enabled.load(Ordering::SeqCst) {
                         output.fill_with(|| T::from_sample(0.0));

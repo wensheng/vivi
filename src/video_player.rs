@@ -47,6 +47,17 @@ impl PlaybackState {
         }
     }
 
+    /// FLUSH invalidates the presenter's PLAY state, so playback must restart. The restarted
+    /// PLAY has to begin at the recovery keyframe's timeline position: reusing the original
+    /// stream start would schedule every resumed frame `already-played` seconds of wall time
+    /// into the future, leaving the source blank and its linked audio silent.
+    fn begin_recovery_restart(&mut self) {
+        self.playback_started = false;
+        self.first_pts_us = None;
+        self.audio_buffered_us = 0;
+        self.audio_horizon_us = None;
+    }
+
     fn observe_audio_packet(&mut self, pts_us: i64, duration_us: u64) {
         self.audio_buffered_us = self.audio_buffered_us.saturating_add(duration_us);
         let duration_us = i64::try_from(duration_us).unwrap_or(i64::MAX);
@@ -57,6 +68,19 @@ impl PlaybackState {
             *horizon = horizon.saturating_add(duration_us);
         }
     }
+}
+
+/// The initial linked-A/V start can only begin on a keyframe, so undecodable leading delta
+/// frames are discarded. A restart after keyframe recovery has already submitted the new
+/// epoch's keyframe, so the queued delta frames that follow it are decodable and must be kept.
+fn linked_start_ready(state: &PlaybackState, pending_video: &mut VecDeque<EncodedPacket>) -> bool {
+    if state.packet_id > 0 {
+        return true;
+    }
+    while pending_video.front().is_some_and(|packet| !packet.key) {
+        pending_video.pop_front();
+    }
+    pending_video.front().is_some_and(|packet| packet.key)
 }
 
 fn audio_covers_video(packet: &EncodedPacket, audio_horizon_us: Option<i64>) -> bool {
@@ -76,7 +100,11 @@ fn start_playback(
     state: &mut PlaybackState,
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    client.play(source_id, minimum_buffer_us)?;
+    client.play_at(
+        source_id,
+        state.first_pts_us.unwrap_or(0),
+        minimum_buffer_us,
+    )?;
     state.playback_started = true;
     state.playback_wall_start = Some(Instant::now());
     if !state.audio_started
@@ -123,9 +151,7 @@ impl VideoSubmitter<'_> {
         if state.awaiting_keyframe {
             self.client.flush(self.source_id, state.epoch)?;
             state.awaiting_keyframe = false;
-            state.playback_started = false;
-            state.audio_buffered_us = 0;
-            state.audio_horizon_us = None;
+            state.begin_recovery_restart();
         }
         if !self.source.is_visible() {
             if state.audio_started
@@ -135,7 +161,11 @@ impl VideoSubmitter<'_> {
             }
             self.client.pause(self.source_id)?;
             self.client.wait_until_visible(self.source)?;
-            self.client.play(self.source_id, INITIAL_BUFFER_US)?;
+            self.client.play_at(
+                self.source_id,
+                state.first_pts_us.unwrap_or(0),
+                INITIAL_BUFFER_US,
+            )?;
             if state.audio_started
                 && let Some(playback) = self.audio.as_ref()
             {
@@ -243,10 +273,22 @@ pub fn play(
 
     let source_id = client.allocate_id()?;
     let node_id = client.allocate_id()?;
-    let mut source = client.create_video_source(source_id, &info)?;
-    let mut vivid_audio = if vivid_audio_available {
-        let audio_id = client.allocate_id()?;
-        match client.create_audio_source(audio_id, Some(source_id), info.audio.as_ref().unwrap()) {
+    let audio_id = vivid_audio_available
+        .then(|| client.allocate_id())
+        .transpose()?;
+    let (mut source, presenter_audio) = if let Some(audio_id) = audio_id {
+        let (video, audio) = client.create_linked_av_sources(
+            source_id,
+            &info,
+            audio_id,
+            info.audio.as_ref().unwrap(),
+        )?;
+        (video, Some((audio_id, audio)))
+    } else {
+        (client.create_video_source(source_id, &info)?, None)
+    };
+    let mut vivid_audio = if let Some((audio_id, presenter_audio)) = presenter_audio {
+        match presenter_audio {
             Ok(audio_source) => {
                 let audio_channel =
                     client.open_media_channel(&audio_source, ConnectionKind::Audio)?;
@@ -356,22 +398,18 @@ pub fn play(
         }
 
         if vivid_audio.is_some() {
-            if !state.playback_started {
-                while pending_video.front().is_some_and(|packet| !packet.key) {
-                    pending_video.pop_front();
-                }
-                if pending_video.front().is_some_and(|packet| packet.key)
-                    && state.audio_buffered_us >= AUDIO_PREBUFFER_US
-                {
-                    start_playback(
-                        client,
-                        source_id,
-                        AUDIO_PREBUFFER_US,
-                        &mut audio,
-                        &mut state,
-                        path,
-                    )?;
-                }
+            if !state.playback_started
+                && linked_start_ready(&state, &mut pending_video)
+                && state.audio_buffered_us >= AUDIO_PREBUFFER_US
+            {
+                start_playback(
+                    client,
+                    source_id,
+                    AUDIO_PREBUFFER_US,
+                    &mut audio,
+                    &mut state,
+                    path,
+                )?;
             }
             while state.playback_started
                 && pending_video
@@ -525,6 +563,59 @@ mod tests {
     fn video_fit_applies_sample_aspect_ratio() {
         let geometry = TerminalGeometry::with_cell_size(120, 40, 10, 20);
         assert_eq!(display_size(320, 240, 2, 1, 1.0, geometry), (64, 12));
+    }
+
+    #[test]
+    fn keyframe_recovery_restarts_at_the_recovery_position() {
+        let mut state = PlaybackState::new();
+        state.packet_id = 240;
+        state.playback_started = true;
+        state.first_pts_us = Some(0);
+        state.last_pts_us = Some(8_000_000);
+        state.observe_audio_packet(8_000_000, 21_333);
+
+        state.begin_recovery_restart();
+        assert!(!state.playback_started);
+        assert_eq!(
+            state.first_pts_us, None,
+            "the restarted PLAY must begin at the recovery keyframe, not the original stream start"
+        );
+        assert_eq!(state.audio_buffered_us, 0);
+        assert_eq!(state.audio_horizon_us, None);
+    }
+
+    #[test]
+    fn linked_restart_after_recovery_keeps_decodable_delta_frames() {
+        let delta = |pts_us| EncodedPacket {
+            data: vec![1],
+            pts_us,
+            dts_us: pts_us,
+            key: false,
+        };
+        let mut state = PlaybackState::new();
+        let mut pending = VecDeque::from([
+            delta(0),
+            EncodedPacket {
+                data: vec![2],
+                pts_us: 33_000,
+                dts_us: 33_000,
+                key: true,
+            },
+        ]);
+        assert!(linked_start_ready(&state, &mut pending));
+        assert_eq!(pending.len(), 1, "leading delta frames cannot be decoded");
+        let mut no_key = VecDeque::from([delta(0), delta(33_000)]);
+        assert!(!linked_start_ready(&state, &mut no_key));
+        assert!(no_key.is_empty());
+
+        state.packet_id = 241;
+        let mut recovered = VecDeque::from([delta(8_000_000), delta(8_033_000)]);
+        assert!(linked_start_ready(&state, &mut recovered));
+        assert_eq!(
+            recovered.len(),
+            2,
+            "delta frames after the submitted recovery keyframe stay queued"
+        );
     }
 
     #[test]
