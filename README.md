@@ -1,8 +1,8 @@
 # Vivi
 
-`vivi` is the Vivid Protocol 1.1 image viewer and media player for
-[Vivido](../vivido/). It requires a presenter that selects protocol 1.1; there is no protocol 1.0,
-anchor-v1, or FFmpeg-packet-v0 fallback.
+`vivi` is the Vivid Protocol 1.0 image viewer and media player for
+[Vivido](../vivido/). It requires a presenter that selects Vivid 1.0; there is no fallback to the
+retired pre-current profile, anchor-v1, or FFmpeg-packet-v0.
 
 Vivi streams encoded embedded audio and standalone MP3, M4A, FLAC, Ogg/Opus, Ogg/Vorbis, and WAV
 access units to Vivido. Vivido decodes and plays them through the system default CoreAudio, ALSA,
@@ -115,6 +115,10 @@ uses private stream-local forwarding and transfers the token through protected s
 as an SSH or remote-shell argument. Audio uses the same Vivid tunnel; see
 [Remote Linux audio over SSH](docs/ssh-linux-audio.md).
 
+To run Linux Vivi in WSL under Windows Vivido, see
+[Running WSL Vivi inside Windows Vivido](../docs/vivi-over-wsl.md). That setup uses WSL environment
+bridging, mirrored loopback networking, and the Windows ConPTY anchor transport.
+
 For high-bandwidth or high-latency links, `vvssh --separate-media-transport user@host` creates a
 second lifecycle-bound SSH TCP connection and exports `VIVID_ENDPOINT_BULK` remotely. It is opt-in;
 the ordinary single-transport path remains the default.
@@ -126,7 +130,7 @@ vivi --dry-run --verbose photo.png
 vivi --trace-dir /tmp/vivi-trace --verbose clip.mkv
 ```
 
-Each trace begins with the framing-1.0 `VIVD` preface and contains protocol-1.1 records.
+Each trace begins with the version-1.0 `VIVD` preface and contains Vivid 1.0 records.
 Dry-run and trace modes emit deterministic audio control/media records and never open an audio
 output device.
 
@@ -142,4 +146,5 @@ Very large raw raster frames and access units that exceed their negotiated sourc
 rejected. Windows uses a private loopback TCP endpoint; non-loopback TCP endpoints are rejected by
 `vvssh`.
 
-The normative wire contract is [docs/vivid_protocol_spec.md](../docs/vivid_protocol_spec.md).
+The normative wire contract is
+[vivid-protocol-1.0-spec.md](../vivid_protocol/vivid-protocol-1.0-spec.md).

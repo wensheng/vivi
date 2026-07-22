@@ -24,6 +24,8 @@ impl VideoConfig for VideoInfo {
             sar_num: self.sar_num,
             sar_den: self.sar_den,
             max_access_unit_bytes: self.max_access_unit_bytes,
+            codec_string: self.codec_string.as_deref(),
+            decoder_config: self.decoder_config.as_deref(),
         }
     }
 }
@@ -45,6 +47,7 @@ impl AudioConfig for AudioInfo {
             channel_mask: self.channel_mask,
             bitrate: self.bitrate,
             max_access_unit_bytes: self.max_access_unit_bytes,
+            codec_string: self.codec_string.as_deref(),
         }
     }
 }
@@ -74,6 +77,7 @@ pub fn producer_config(config: &Config) -> ProducerConfig {
             messages::FEATURE_VIDEO_ACCESS_UNIT_V1,
             messages::FEATURE_VIDEO_CONTROL_V1,
             messages::FEATURE_AUDIO_ACCESS_UNIT_V1,
+            messages::FEATURE_DECODER_DESCRIPTION_V1,
         ],
     }
 }

@@ -289,6 +289,12 @@ pub struct VideoInfo {
     pub first_pts_us: Option<i64>,
     pub has_audio: bool,
     pub audio: Option<AudioInfo>,
+    /// RFC 6381 codec string derived from the container decoder configuration
+    /// (`decoder-description-v1`).
+    pub codec_string: Option<String>,
+    /// Original ISO-BMFF decoder configuration box body (avcC/hvcC/av1C) before Annex-B
+    /// normalization (`decoder-description-v1`).
+    pub decoder_config: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +308,8 @@ pub struct AudioInfo {
     pub bitrate: i64,
     pub max_access_unit_bytes: u32,
     pub first_pts_us: Option<i64>,
+    /// RFC 6381 codec string (`decoder-description-v1`).
+    pub codec_string: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1119,6 +1127,9 @@ unsafe fn video_info(parameters: *mut AVCodecParameters) -> io::Result<(VideoInf
         unsafe { std::slice::from_raw_parts(parameters.extradata, extradata_size) }.to_vec()
     };
 
+    // Retain the container decoder-configuration box (avcC/hvcC/av1C) before Annex-B
+    // normalization so `decoder-description-v1` can carry it verbatim.
+    let container_box = (!extradata.is_empty() && extradata[0] != 0).then(|| extradata.clone());
     let (packetization, extradata, nal_length_size) = match codec.as_str() {
         "h264" => {
             let (data, length) = normalize_h26x_extradata(&extradata, false)?;
@@ -1133,10 +1144,18 @@ unsafe fn video_info(parameters: *mut AVCodecParameters) -> io::Result<(VideoInf
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("codec {codec:?} has no Vivid 1.1 portable packetization"),
+                format!("codec {codec:?} has no Vivid 1.0 portable packetization"),
             ));
         }
     };
+    let (codec_string, decoder_config) = derive_video_description(
+        &codec,
+        container_box,
+        &extradata,
+        parameters.profile,
+        parameters.level,
+        parameters.bits_per_raw_sample,
+    );
     let colorimetry_inferred = parameters.color_primaries == AVCOL_PRI_UNSPECIFIED
         || parameters.color_trc == AVCOL_TRC_UNSPECIFIED
         || parameters.color_space == AVCOL_SPC_UNSPECIFIED
@@ -1173,9 +1192,137 @@ unsafe fn video_info(parameters: *mut AVCodecParameters) -> io::Result<(VideoInf
             first_pts_us: None,
             has_audio: false,
             audio: None,
+            codec_string,
+            decoder_config,
         },
         nal_length_size,
     ))
+}
+
+/// Derive the optional `decoder-description-v1` fields from the container decoder-configuration
+/// box or codec parameters. For H.264 Annex-B extradata, use the parameter sets themselves.
+/// Returns `None` rather than guessing: a missing description is valid, a wrong one is not.
+fn derive_video_description(
+    codec: &str,
+    container_box: Option<Vec<u8>>,
+    annexb_extradata: &[u8],
+    profile: i32,
+    level: i32,
+    bits_per_raw_sample: i32,
+) -> (Option<String>, Option<Vec<u8>>) {
+    match codec {
+        "h264" => {
+            // avcC bytes 1..4 are exactly profile_idc, constraint flags, and level_idc.
+            if let Some(avcc) = container_box.filter(|data| data.len() >= 4 && data[0] == 1) {
+                let string = format!("avc1.{:02X}{:02X}{:02X}", avcc[1], avcc[2], avcc[3]);
+                return (Some(string), Some(avcc));
+            }
+            // Annex-B extradata: the same three bytes follow the SPS NAL header.
+            let string = find_h264_sps(annexb_extradata)
+                .filter(|sps| sps.len() >= 4)
+                .map(|sps| format!("avc1.{:02X}{:02X}{:02X}", sps[1], sps[2], sps[3]));
+            (string, None)
+        }
+        "hevc" => {
+            let Some(hvcc) = container_box.filter(|data| data.len() >= 23 && data[0] == 1) else {
+                return (None, None);
+            };
+            (Some(hevc_codec_string(&hvcc)), Some(hvcc))
+        }
+        "vp9" => {
+            if let Some(vpcc) = container_box.filter(|data| data.len() >= 12 && data[0] == 1) {
+                let string = vp9_codec_string(
+                    i32::from(vpcc[1]),
+                    i32::from(vpcc[2]),
+                    i32::from(vpcc[3] >> 4),
+                );
+                return (string, Some(vpcc));
+            }
+            (vp9_codec_string(profile, level, bits_per_raw_sample), None)
+        }
+        "av1" => {
+            let Some(av1c) = container_box.filter(|data| data.len() >= 4 && data[0] == 0x81) else {
+                return (None, None);
+            };
+            (Some(av1_codec_string(&av1c)), Some(av1c))
+        }
+        _ => (None, None),
+    }
+}
+
+fn vp9_codec_string(profile: i32, level: i32, bits_per_raw_sample: i32) -> Option<String> {
+    let profile = u8::try_from(profile).ok().filter(|profile| *profile <= 3)?;
+    let level = u8::try_from(level).ok().filter(|level| {
+        matches!(
+            level,
+            10 | 11 | 20 | 21 | 30 | 31 | 40 | 41 | 50 | 51 | 52 | 60 | 61 | 62
+        )
+    })?;
+    let bit_depth = match bits_per_raw_sample {
+        8 | 10 | 12 => bits_per_raw_sample,
+        0 if profile <= 1 => 8,
+        _ => return None,
+    };
+    Some(format!("vp09.{profile:02}.{level:02}.{bit_depth:02}"))
+}
+
+/// Find the first H.264 SPS NAL in an Annex-B buffer, returned from its header byte onward.
+fn find_h264_sps(data: &[u8]) -> Option<&[u8]> {
+    let mut index = 0;
+    while index + 4 <= data.len() {
+        if data[index..index + 3] == [0, 0, 1] {
+            let nal = &data[index + 3..];
+            if nal.first().is_some_and(|header| header & 0x1f == 7) {
+                return Some(nal);
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+/// ISO/IEC 14496-15 Annex E codec string from an hvcC box body.
+fn hevc_codec_string(hvcc: &[u8]) -> String {
+    let profile_space = hvcc[1] >> 6;
+    let tier = if hvcc[1] & 0x20 == 0 { 'L' } else { 'H' };
+    let profile_idc = hvcc[1] & 0x1f;
+    let compatibility = u32::from_be_bytes(hvcc[2..6].try_into().unwrap());
+    let level_idc = hvcc[12];
+    let mut string = String::from("hvc1.");
+    if profile_space > 0 {
+        string.push((b'A' + profile_space - 1) as char);
+    }
+    string.push_str(&format!(
+        "{profile_idc}.{:X}.{tier}{level_idc}",
+        compatibility.reverse_bits()
+    ));
+    // Constraint bytes, trailing zero bytes omitted.
+    let constraints = &hvcc[6..12];
+    let significant = constraints
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(0, |index| index + 1);
+    for byte in &constraints[..significant] {
+        string.push_str(&format!(".{byte:X}"));
+    }
+    string
+}
+
+/// AV1 codec string from an av1C box body (AV1-ISOBMFF section 2.3).
+fn av1_codec_string(av1c: &[u8]) -> String {
+    let profile = av1c[1] >> 5;
+    let level = av1c[1] & 0x1f;
+    let tier = if av1c[2] & 0x80 == 0 { 'M' } else { 'H' };
+    let high_bitdepth = av1c[2] & 0x40 != 0;
+    let twelve_bit = av1c[2] & 0x20 != 0;
+    let depth = match (high_bitdepth, twelve_bit) {
+        (false, _) => 8,
+        (true, false) => 10,
+        (true, true) => 12,
+    };
+    format!("av01.{profile}.{level:02}{tier}.{depth:02}")
 }
 
 unsafe fn audio_info(
@@ -1238,6 +1385,7 @@ unsafe fn audio_info(
         && stream.time_base.num > 0
         && stream.time_base.den > 0)
         .then(|| timestamp_us(stream.start_time, stream.time_base));
+    let codec_string = derive_audio_codec_string(&codec, &extradata);
     Ok(AudioInfo {
         codec,
         packetization: packetization.into(),
@@ -1248,7 +1396,36 @@ unsafe fn audio_info(
         bitrate: parameters.bit_rate,
         max_access_unit_bytes: 0,
         first_pts_us,
+        codec_string,
     })
+}
+
+/// Derive the optional `decoder-description-v1` audio codec string.
+fn derive_audio_codec_string(codec: &str, extradata: &[u8]) -> Option<String> {
+    match codec {
+        "aac" => {
+            // `mp4a.40.<audioObjectType>` from the AudioSpecificConfig's leading bits.
+            let first = *extradata.first()?;
+            let object_type = if first >> 3 == 31 {
+                // Five-bit escape: 32 plus a six-bit extension.
+                let second = *extradata.get(1)?;
+                32 + (u16::from(first & 0x07) << 3 | u16::from(second >> 5))
+            } else {
+                u16::from(first >> 3)
+            };
+            (object_type != 0).then(|| format!("mp4a.40.{object_type}"))
+        }
+        "mp3" => Some("mp3".to_owned()),
+        "opus" | "vorbis" | "flac" | "alac" => Some(codec.to_owned()),
+        "pcm_mulaw" => Some("ulaw".to_owned()),
+        "pcm_alaw" => Some("alaw".to_owned()),
+        "pcm_u8" => Some("pcm-u8".to_owned()),
+        "pcm_s16le" => Some("pcm-s16".to_owned()),
+        "pcm_s24le" => Some("pcm-s24".to_owned()),
+        "pcm_s32le" => Some("pcm-s32".to_owned()),
+        "pcm_f32le" => Some("pcm-f32".to_owned()),
+        _ => None,
+    }
 }
 
 fn normalize_audio_extradata(codec: &str, data: &[u8]) -> io::Result<Vec<u8>> {
@@ -1627,5 +1804,19 @@ mod tests {
         assert_eq!(normalize_flac_extradata(&flac).unwrap(), streaminfo);
 
         assert!(normalize_audio_extradata("opus", b"not-an-opus-head").is_err());
+    }
+
+    #[test]
+    fn decoder_descriptions_cover_container_and_parameter_driven_codecs() {
+        let vpcc = vec![1, 2, 31, 10 << 4, 1, 1, 1, 0, 0, 0, 0, 0];
+        let (codec_string, decoder_config) =
+            derive_video_description("vp9", Some(vpcc.clone()), &[], 0, 0, 0);
+        assert_eq!(codec_string.as_deref(), Some("vp09.02.31.10"));
+        assert_eq!(decoder_config.as_deref(), Some(vpcc.as_slice()));
+
+        let (codec_string, decoder_config) = derive_video_description("vp9", None, &[], 0, 41, 0);
+        assert_eq!(codec_string.as_deref(), Some("vp09.00.41.08"));
+        assert_eq!(decoder_config, None);
+        assert_eq!(vp9_codec_string(2, 41, 0), None);
     }
 }

@@ -70,7 +70,7 @@ pub fn view(
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "{} is {width}x{height}; its uncompressed frame exceeds the Vivid 1.1 \
+                    "{} is {width}x{height}; its uncompressed frame exceeds the Vivid 1.0 \
                      raster record limit",
                     path.display()
                 ),
